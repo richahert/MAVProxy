@@ -12,8 +12,10 @@ import time
 import errno
 import select
 from MAVProxy.modules.lib import rtcm3
+from pynmeagps import NMEAMessage, GET
 import ssl
 from optparse import OptionParser
+import traceback
 
 version = 0.1
 useragent = "NTRIP MAVProxy/%.1f" % version
@@ -30,20 +32,21 @@ class NtripError(Exception):
 
 
 class NtripClient(object):
-    def __init__(self,
-                 user="",
-                 port=2101,
-                 caster="",
-                 mountpoint="",
-                 host=False,
-                 lat=46,
-                 lon=122,
-                 height=1212,
-                 ssl=False,
-                 V2=False,
-                 ):
+    def __init__(
+        self,
+        user="",
+        port=2101,
+        caster="",
+        mountpoint="",
+        host=False,
+        lat=46,
+        lon=122,
+        height=1212,
+        ssl=False,
+        V2=False,
+    ):
         if sys.version_info.major >= 3:
-            user = bytearray(user, 'ascii')
+            user = bytearray(user, "ascii")
         self.user = base64.b64encode(user)
         self.port = port
         self.caster = caster
@@ -73,30 +76,34 @@ class NtripClient(object):
         self.flagN = "N"
         self.flagE = "E"
         if lon > 180:
-            lon = (lon-360)*-1
+            lon = (lon - 360) * -1
             self.flagE = "W"
         elif lon < 0 and lon >= -180:
-            lon = lon*-1
+            lon = lon * -1
             self.flagE = "W"
         elif lon < -180:
-            lon = lon+360
+            lon = lon + 360
             self.flagE = "E"
         else:
             self.lon = lon
         if lat < 0:
-            lat = lat*-1
+            lat = lat * -1
             self.flagN = "S"
         self.lonDeg = int(lon)
         self.latDeg = int(lat)
-        self.lonMin = (lon-self.lonDeg)*60
-        self.latMin = (lat-self.latDeg)*60
+        self.lonMin = (lon - self.lonDeg) * 60
+        self.latMin = (lat - self.latDeg) * 60
+        self.lat = lat
+        self.lon = lon
 
     def getMountPointString(self):
         userstr = self.user
         if sys.version_info.major >= 3:
-            userstr = str(userstr, 'ascii')
-        mountPointString = "GET %s HTTP/1.0\r\nUser-Agent: %s\r\nAuthorization: Basic %s\r\n" % (
-            self.mountpoint, useragent, userstr)
+            userstr = str(userstr, "ascii")
+        mountPointString = (
+            "GET %s HTTP/1.0\r\nUser-Agent: %s\r\nAuthorization: Basic %s\r\n"
+            % (self.mountpoint, useragent, userstr)
+        )
         if self.host or self.V2:
             hostString = "Host: %s:%i\r\n" % (self.caster, self.port)
             mountPointString += hostString
@@ -107,11 +114,44 @@ class NtripClient(object):
 
     def getGGAString(self):
         now = datetime.datetime.utcnow()
-        ggaString = "GPGGA,%02d%02d%04.2f,%02d%011.8f,%1s,%03d%011.8f,%1s,1,05,0.19,+00400,M,%5.3f,M,," % (
-                     now.hour, now.minute, now.second, self.latDeg, self.latMin, self.flagN,
-                     self.lonDeg, self.lonMin, self.flagE, self.height)
+        ggaString = (
+            "GNGGA,%02d%02d%04.2f,%02d%011.8f,%1s,%03d%011.8f,%1s,1,05,0.19,+00400,M,%5.3f,M,,"
+            % (
+                now.hour,
+                now.minute,
+                now.second,
+                self.latDeg,
+                self.latMin,
+                self.flagN,
+                self.lonDeg,
+                self.lonMin,
+                self.flagE,
+                self.height,
+            )
+        )
         checksum = self.calculateCheckSum(ggaString)
-        return "$%s*%s\r\n" % (ggaString, checksum)
+        print("old", "$%s*%s\r\n" % (ggaString, checksum))
+        parsed_data = NMEAMessage(
+            "GP",
+            "GGA",
+            GET,
+            lat=self.lat,
+            NS="S" if self.lat < 0 else "N",
+            lon=self.lon,
+            EW="W" if self.lon < 0 else "E",
+            quality=1,
+            numSV=15,
+            HDOP=0,
+            alt=self.height,
+            altUnit="M",
+            sep=0,
+            sepUnit="M",
+            diffAge="",
+            diffStation=0,
+        )
+
+        raw_data = parsed_data.serialize()
+        return raw_data
 
     def calculateCheckSum(self, stringToCheck):
         xsum_calc = 0
@@ -120,7 +160,7 @@ class NtripClient(object):
         return "%02X" % xsum_calc
 
     def get_ID(self):
-        '''get ID of last packet'''
+        """get ID of last packet"""
         return self.last_id
 
     def read(self):
@@ -140,7 +180,7 @@ class NtripClient(object):
                 time.sleep(0.1)
                 mps = self.getMountPointString()
                 if sys.version_info.major >= 3:
-                    mps = bytearray(mps, 'ascii')
+                    mps = bytearray(mps, "ascii")
                 try:
                     self.socket.sendall(mps)
                 except ssl.SSLWantReadError:
@@ -152,16 +192,20 @@ class NtripClient(object):
             try:
                 casterResponse = self.socket.recv(4096)
             except ssl.SSLWantReadError:
-                    return None
+                return None
             except IOError as e:
                 if e.errno == errno.EWOULDBLOCK:
                     return None
                 self.socket = None
-                casterResponse = ''
+                casterResponse = ""
             if sys.version_info.major >= 3:
                 # Ignore non ascii characters in HTTP response
-                casterResponse = str(casterResponse, 'ascii', 'ignore')
+                casterResponse = str(casterResponse, "ascii", "ignore")
             header_lines = casterResponse.split("\r\n")
+            print("Response:")
+            for line in header_lines:
+                print(line)
+
             for line in header_lines:
                 if line == "":
                     self.found_header = True
@@ -177,10 +221,12 @@ class NtripClient(object):
             return None
         # normal data read
         while True:
+            if time.time() - self.dt_last_gga_sent > 2:
+                self.send_gga()
             try:
                 data = self.socket.recv(1)
             except ssl.SSLWantReadError:
-                    return None
+                return None
             except IOError as e:
                 if e.errno == errno.EWOULDBLOCK:
                     return None
@@ -197,10 +243,12 @@ class NtripClient(object):
                 return None
             if self.rtcm3.read(data):
                 self.last_id = self.rtcm3.get_packet_ID()
+                print("got RTCM3 Message of type ", self.last_id)
                 return self.rtcm3.get_packet()
 
     def connect(self):
-        '''connect to NTRIP server'''
+        """connect to NTRIP server"""
+        # breakpoint()
         self.sent_header = False
         self.found_header = False
         # use a non-blocking connect to prevent blocking of mavproxy main thread
@@ -214,8 +262,10 @@ class NtripClient(object):
                     self.rtcm3.reset()
                     return True
                 else:
+                    print(err)
                     self.socket_pending = None
             return
+        print("Connecting to caster..")
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setblocking(0)
         if self.ssl:
@@ -225,6 +275,7 @@ class NtripClient(object):
                 try:
                     self.caster_ip = socket.gethostbyname(self.caster)
                 except Exception:
+                    traceback.print_exc()
                     return False
             if self.caster_ip is None:
                 return False
@@ -232,6 +283,7 @@ class NtripClient(object):
             self.socket_pending = sock
             return False
         except Exception as ex:
+            traceback.print_exc()
             return False
         if error_indicator == 0:
             sock.setblocking(0)
@@ -246,71 +298,148 @@ class NtripClient(object):
             if data is None:
                 continue
             print("got: ", len(data))
+            if time.time() - self.dt_last_gga_sent > 1:
+                self.send_gga()
 
     def send_gga(self):
         gga = self.getGGAString()
         if sys.version_info.major >= 3:
-            gga = bytearray(gga, "ascii")
+            # gga = bytearray(gga, "ascii")
+            pass
         try:
+            print(f"sending ", gga, "...")
             self.socket.sendall(gga)
             self.dt_last_gga_sent = time.time()
         except Exception:
+            print(
+                "Could not send gga. Lost connection to socket. Reconnect in some seconds."
+            )
             self.socket = None
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     usage = "NtripClient.py [options] [caster] [port] mountpoint"
     parser = OptionParser(version=version, usage=usage)
-    parser.add_option("-u", "--user", type="string", dest="user", default="IBS", help="The Ntripcaster username.  Default: %default")
-    parser.add_option("-p", "--password", type="string", dest="password", default="IBS", help="The Ntripcaster password. Default: %default")
-    parser.add_option("-o", "--org", type="string", dest="org", help="Use IBSS and the provided organization for the user. Caster and Port are not needed in this case Default: %default")
-    parser.add_option("-b", "--baseorg", type="string", dest="baseorg", help="The org that the base is in. IBSS Only, assumed to be the user org")
-    parser.add_option("-t", "--latitude", type="float", dest="lat", default=50.09, help="Your latitude.  Default: %default")
-    parser.add_option("-g", "--longitude", type="float", dest="lon", default=8.66, help="Your longitude.  Default: %default")
-    parser.add_option("-e", "--height", type="float", dest="height", default=1200, help="Your ellipsoid height.  Default: %default")
-    parser.add_option("-s", "--ssl", action="store_true", dest="ssl", default=False, help="Use SSL for the connection")
-    parser.add_option("-H", "--host", action="store_true", dest="host", default=False, help="Include host header, should be on for IBSS")
-    parser.add_option("-2", "--V2", action="store_true", dest="V2", default=False, help="Make a NTRIP V2 Connection")
+    parser.add_option(
+        "-u",
+        "--user",
+        type="string",
+        dest="user",
+        default="IBS",
+        help="The Ntripcaster username.  Default: %default",
+    )
+    parser.add_option(
+        "-p",
+        "--password",
+        type="string",
+        dest="password",
+        default="IBS",
+        help="The Ntripcaster password. Default: %default",
+    )
+    parser.add_option(
+        "-o",
+        "--org",
+        type="string",
+        dest="org",
+        help="Use IBSS and the provided organization for the user. Caster and Port are not needed in this case Default: %default",
+    )
+    parser.add_option(
+        "-b",
+        "--baseorg",
+        type="string",
+        dest="baseorg",
+        help="The org that the base is in. IBSS Only, assumed to be the user org",
+    )
+    parser.add_option(
+        "-t",
+        "--latitude",
+        type="float",
+        dest="lat",
+        default=50.09,
+        help="Your latitude.  Default: %default",
+    )
+    parser.add_option(
+        "-g",
+        "--longitude",
+        type="float",
+        dest="lon",
+        default=8.66,
+        help="Your longitude.  Default: %default",
+    )
+    parser.add_option(
+        "-e",
+        "--height",
+        type="float",
+        dest="height",
+        default=1200,
+        help="Your ellipsoid height.  Default: %default",
+    )
+    parser.add_option(
+        "-s",
+        "--ssl",
+        action="store_true",
+        dest="ssl",
+        default=False,
+        help="Use SSL for the connection",
+    )
+    parser.add_option(
+        "-H",
+        "--host",
+        action="store_true",
+        dest="host",
+        default=False,
+        help="Include host header, should be on for IBSS",
+    )
+    parser.add_option(
+        "-2",
+        "--V2",
+        action="store_true",
+        dest="V2",
+        default=False,
+        help="Make a NTRIP V2 Connection",
+    )
 
     (options, args) = parser.parse_args()
     ntripArgs = {}
 
-    ntripArgs['lat'] = options.lat
-    ntripArgs['lon'] = options.lon
-    ntripArgs['height'] = options.height
-    ntripArgs['host'] = options.host
+    ntripArgs["lat"] = options.lat
+    ntripArgs["lon"] = options.lon
+    ntripArgs["height"] = options.height
+    ntripArgs["host"] = options.host
 
     if options.ssl:
         import ssl
-        ntripArgs['ssl'] = True
+
+        ntripArgs["ssl"] = True
     else:
-        ntripArgs['ssl'] = False
+        ntripArgs["ssl"] = False
 
     if options.org:
         if len(args) != 1:
             print("Incorrect number of arguments for IBSS\n")
             parser.print_help()
             sys.exit(1)
-        ntripArgs['user'] = options.user+"." + options.org + ":" + options.password
+        ntripArgs["user"] = options.user + "." + options.org + ":" + options.password
         if options.baseorg:
-            ntripArgs['caster'] = options.baseorg + ".ibss.trimbleos.com"
+            ntripArgs["caster"] = options.baseorg + ".ibss.trimbleos.com"
         else:
-            ntripArgs['caster'] = options.org + ".ibss.trimbleos.com"
+            ntripArgs["caster"] = options.org + ".ibss.trimbleos.com"
         if options.ssl:
-            ntripArgs['port'] = 52101
+            ntripArgs["port"] = 52101
         else:
-            ntripArgs['port'] = 2101
-        ntripArgs['mountpoint'] = args[0]
+            ntripArgs["port"] = 2101
+        ntripArgs["mountpoint"] = args[0]
     else:
         if len(args) != 3:
             print("Incorrect number of arguments for NTRIP\n")
             parser.print_help()
             sys.exit(1)
-        ntripArgs['user'] = options.user+":"+options.password
-        ntripArgs['caster'] = args[0]
-        ntripArgs['port'] = int(args[1])
-        ntripArgs['mountpoint'] = args[2]
+        ntripArgs["user"] = options.user + ":" + options.password
+        ntripArgs["caster"] = args[0]
+        ntripArgs["port"] = int(args[1])
+        ntripArgs["mountpoint"] = args[2]
 
-    ntripArgs['V2'] = options.V2
+    ntripArgs["V2"] = options.V2
 
     n = NtripClient(**ntripArgs)
     n.readLoop()
